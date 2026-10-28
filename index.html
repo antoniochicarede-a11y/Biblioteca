@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Biblioteca de barrio</title>
+<style>
+:root{color-scheme:light dark;--b:#8884;--ac:#2d6a4f}
+body{font:16px system-ui,sans-serif;max-width:860px;margin:0 auto;padding:12px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+h1{font-size:1.4rem;margin:.3em 0}
+nav button,button,input,select{font:inherit;padding:6px 10px;border:1px solid var(--b);border-radius:6px;background:transparent;color:inherit}
+nav button.on,button.p{background:var(--ac);color:#fff;border-color:var(--ac)}
+button{cursor:pointer}nav{display:flex;gap:6px;margin:8px 0}
+section{display:none}section.on{display:block}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+td,th{padding:6px;border-bottom:1px solid var(--b);text-align:left}
+#msg{min-height:1.4em;margin:8px 0;font-weight:600}.err{color:#c0392b}.ok{color:var(--ac)}.late{color:#c0392b}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+</style></head><body>
+<header><h1>📚 Biblioteca de barrio</h1>
+<label>Hoy (simulado) <input type="date" id="hoy"></label></header>
+<nav id="tabs"><button data-t="cat" class="on">Catálogo</button><button data-t="soc">Socios</button><button data-t="pre">Préstamos</button></nav>
+<div id="msg"></div>
+
+<section id="cat" class="on">
+ <div class="row"><input id="q" placeholder="Buscar título…" oninput="render()">
+ <select id="sel"></select></div>
+ <table id="tcat"></table>
+</section>
+<section id="soc">
+ <div class="row"><input id="nom" placeholder="Nombre del nuevo socio"><button class="p" onclick="run(()=>{Socios.alta(nom.value);nom.value='';return'Socio dado de alta'})">Dar de alta</button></div>
+ <table id="tsoc"></table>
+</section>
+<section id="pre"><table id="tpre"></table></section>
+
+<script>
+/* ---------- Estado persistente (cada componente toca solo su parte) ---------- */
+const KEY='biblioteca-v1';
+const DB=JSON.parse(localStorage.getItem(KEY)||'null')||{libros:[],socios:[],prestamos:[],reservas:{},seq:{l:1,s:1,p:1}};
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(DB))}catch(e){}};
+const addDias=(f,d)=>{const x=new Date(f);x.setUTCDate(x.getUTCDate()+d);return x.toISOString().slice(0,10)};
+const difDias=(a,b)=>Math.round((new Date(a)-new Date(b))/864e5);
+
+/* ---------- Catalogo (no conoce a nadie) ---------- */
+const vista=l=>({id:l.id,titulo:l.titulo,autor:l.autor,total:l.ejemplares.length,disponibles:l.ejemplares.filter(e=>e.estado==='disponible').length});
+const Catalogo={
+ agregar(titulo,autor,n){const l={id:DB.seq.l++,titulo,autor,ejemplares:[]};for(let i=1;i<=n;i++)l.ejemplares.push({id:l.id+'-'+i,estado:'disponible'});DB.libros.push(l);save()},
+ buscar(t){t=t.toLowerCase();return DB.libros.filter(l=>l.titulo.toLowerCase().includes(t)).map(vista)},
+ _raw(id){const l=DB.libros.find(l=>l.id===id);if(!l)throw Error('Libro inexistente');return l},
+ obtener(id){return vista(this._raw(id))},
+ marcarPrestado(id){const e=this._raw(id).ejemplares.find(e=>e.estado==='disponible');if(!e)throw Error('No quedan ejemplares libres');e.estado='prestado';save();return e.id},
+ marcarDevuelto(id,eid){this._raw(id).ejemplares.find(e=>e.id===eid).estado='disponible';save()}
+};
+
+/* ---------- Socios (no conoce a nadie) ---------- */
+const Socios={
+ alta(n){n=n.trim();if(!n)throw Error('El nombre no puede estar vacío');const s={id:DB.seq.s++,nombre:n,sancionadoHasta:null};DB.socios.push(s);save();return{...s}},
+ obtener(id){const s=DB.socios.find(s=>s.id===id);if(!s)throw Error('Socio inexistente');return{...s}},
+ listar(){return DB.socios.map(s=>({...s}))},
+ estaSancionado(id,h){const s=this.obtener(id);return !!s.sancionadoHasta&&h<=s.sancionadoHasta},
+ sancionar(id,dias,h){this.obtener(id);DB.socios.find(s=>s.id===id).sancionadoHasta=addDias(h,dias);save()}
+};
+
+/* ---------- Prestamos (usa solo la API pública de los otros dos) ---------- */
+const MAX=2,DIAS=7;
+const Prestamos={
+ activos(sid){return DB.prestamos.filter(p=>!p.devuelto&&(sid==null||p.socioId===sid)).map(p=>({...p}))},
+ enCola(lid){return(DB.reservas[lid]||[]).length},
+ prestar(sid,lid,h){
+  Socios.obtener(sid);const l=Catalogo.obtener(lid);
+  if(Socios.estaSancionado(sid,h))throw Error('Socio sancionado: no puede pedir libros');
+  if(this.activos(sid).length>=MAX)throw Error('Un socio no puede tener más de '+MAX+' libros a la vez');
+  if(!l.disponibles)throw Error('No quedan ejemplares: puede reservarlo');
+  const cola=DB.reservas[lid]=DB.reservas[lid]||[];
+  if(cola.slice(0,l.disponibles).includes(sid))cola.splice(cola.indexOf(sid),1);
+  else if(cola.length>=l.disponibles)throw Error('Los ejemplares libres están reservados por otros socios');
+  const eid=Catalogo.marcarPrestado(lid);
+  DB.prestamos.push({id:DB.seq.p++,socioId:sid,libroId:lid,ejemplarId:eid,inicio:h,vence:addDias(h,DIAS),devuelto:null});save()},
+ reservar(sid,lid,h){
+  Socios.obtener(sid);const l=Catalogo.obtener(lid);
+  if(Socios.estaSancionado(sid,h))throw Error('Socio sancionado: no puede reservar');
+  const cola=DB.reservas[lid]=DB.reservas[lid]||[];
+  if(cola.includes(sid))throw Error('Ya tiene este libro reservado');
+  if(l.disponibles>cola.length)throw Error('Hay ejemplares libres: pídalo directamente');
+  cola.push(sid);save();return cola.length},
+ devolver(pid,h){
+  const p=DB.prestamos.find(p=>p.id===pid&&!p.devuelto);if(!p)throw Error('Préstamo inexistente o ya devuelto');
+  Catalogo.marcarDevuelto(p.libroId,p.ejemplarId);p.devuelto=h;
+  const r=difDias(h,p.vence);if(r>0)Socios.sancionar(p.socioId,r,h);save();return r}
+};
+
+/* ---------- Interfaz ---------- */
+const $=id=>document.getElementById(id);
+$('hoy').value=new Date().toISOString().slice(0,10);$('hoy').onchange=()=>render();
+const hoy=()=>$('hoy').value;
+function run(f){const m=$('msg');try{m.className='ok';m.textContent=f()||'Hecho'}catch(e){m.className='err';m.textContent='✗ '+e.message}render()}
+document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>{
+ document.querySelectorAll('#tabs button,section').forEach(x=>x.classList.remove('on'));
+ b.classList.add('on');$(b.dataset.t).classList.add('on')});
+const nomSoc=id=>Socios.obtener(id).nombre;
+function render(){
+ const sel=$('sel'),cur=sel.value;
+ sel.innerHTML=Socios.listar().map(s=>`<option value="${s.id}">${esc(s.nombre)}</option>`).join('')||'<option value="">(sin socios)</option>';sel.value=cur;
+ $('tcat').innerHTML='<tr><th>Título</th><th>Libres</th><th>Reservas</th><th></th></tr>'+Catalogo.buscar($('q').value).map(l=>
+  `<tr><td><b>${esc(l.titulo)}</b><br><small>${esc(l.autor)}</small></td><td>${l.disponibles}/${l.total}</td><td>${Prestamos.enCola(l.id)}</td>
+  <td><button class="p" onclick="run(()=>{Prestamos.prestar(+sel.value,${l.id},hoy());return'Préstamo hecho: vence en ${DIAS} días'})">Prestar</button>
+  <button onclick="run(()=>'Reservado, posición '+Prestamos.reservar(+sel.value,${l.id},hoy()))">Reservar</button></td></tr>`).join('');
+ $('tsoc').innerHTML='<tr><th>Socio</th><th>Libros</th><th>Estado</th></tr>'+Socios.listar().map(s=>
+  `<tr><td>${esc(s.nombre)}</td><td>${Prestamos.activos(s.id).length}/${MAX}</td><td>${Socios.estaSancionado(s.id,hoy())?'<span class="late">Sancionado hasta '+s.sancionadoHasta+'</span>':'Activo'}</td></tr>`).join('');
+ $('tpre').innerHTML='<tr><th>Socio</th><th>Libro</th><th>Vence</th><th></th></tr>'+(Prestamos.activos().map(p=>
+  `<tr><td>${esc(nomSoc(p.socioId))}</td><td>${esc(Catalogo.obtener(p.libroId).titulo)}</td><td class="${hoy()>p.vence?'late':''}">${p.vence}${hoy()>p.vence?' (vencido)':''}</td>
+  <td><button onclick="run(()=>{const r=Prestamos.devolver(${p.id},hoy());return r>0?'Devuelto con '+r+' días de retraso: socio sancionado':'Devuelto'})">Devolver</button></td></tr>`).join('')||'<tr><td colspan="4">Sin préstamos activos</td></tr>');
+}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+if(!DB.libros.length){[['Don Quijote','Cervantes',3],['Platero y yo','J. R. Jiménez',2],['La sombra del viento','Ruiz Zafón',1],['Rimas y leyendas','Bécquer',2]].forEach(a=>Catalogo.agregar(...a));Socios.alta('Ana');Socios.alta('Luis')}
+render();
+</script></body></html>
